@@ -1,4 +1,6 @@
 import time
+from math import ceil
+
 import pyodbc as pyodbc
 import pandas as pd
 from unidecode import unidecode
@@ -8,38 +10,49 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 
 
 class ValueFinder:
-    def __init__(self, server: str, number_of_threads: int = 10):
-        self.conn_string = f'Driver={{SQL Server}};'f'Server={server};''Database=#database#;''Trusted_Connection=yes;'
+    def __init__(self, server: str, number_of_threads: int = 10, connection_string: str = None):
+        if connection_string:
+            self.conn_string = connection_string
+        else:
+            self.conn_string = f'Driver={{SQL Server}};'f'Server={server};''Database=#database#;''Trusted_Connection=yes;'
+
         self.result = []
 
         self.number_of_threads = number_of_threads if number_of_threads > 0 else 1
 
         self.threads = [{'id': x, 'task': threading.Thread()} for x in range(self.number_of_threads)]
 
-        self.database = [None for x in range(self.number_of_threads)]
-        self.conn = [None for x in range(self.number_of_threads)]
-        self.tables_info = {}
+        self.database: list = [None for x in range(self.number_of_threads)]
+        self.conn: list = [None for x in range(self.number_of_threads)]
+        self.tables_info: dict = {}
 
-    def find_value(self, value, databases: list = None, tables: list = None):
+    def find_value(self, value, databases: list = None, tables: list = None, exact_match: bool = False):
+        execution = time.time()
         databases = databases if databases else self.__get_all_databases()
         for database in databases:
+            print('Database: %s' % database)
             query = 'SELECT DATA_TYPE, COLUMN_NAME,CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, TABLE_NAME FROM INFORMATION_SCHEMA.COLUMNS'
             self.tables_info[database] = pd.read_sql(query, pyodbc.connect(self.conn_string.replace('#database#', database)))
             tables = tables if tables else self.__get_all_tables(database)
             for i, table in enumerate(tables):
-                print('[%i/%i] tables' % (i, len(tables)))
+                print('\r[%i/%i] Scanned Tables' % (i+1, len(tables)), end='')
                 if self.number_of_threads > 1:
                     waiting = True
                     while waiting:
                         for thread in self.threads:
                             if not thread['task'].is_alive():
                                 thread['task'] = threading.Thread(target=self.__finder,
-                                                                  args=(value, database, table, thread['id']))
+                                                                  args=(value, database, table, thread['id'],
+                                                                        exact_match))
                                 thread['task'].start()
                                 waiting = False
                                 break
                 else:
-                    self.__finder(value, database, table, 0)
+                    self.__finder(value, database, table, 0, exact_match)
+        print(('\n\nExecution Time: %s seconds\n' % str(ceil(time.time() - execution))))
+        print('Results: ')
+        for result in self.result:
+            print(result)
         return self.result
 
     def __get_all_tables(self, database):
@@ -57,7 +70,7 @@ class ValueFinder:
             df = df.loc[df['name'] != black]
         return list(df['name'])
 
-    def __finder(self, value, database, table, id: int):
+    def __finder(self, value, database, table, id: int, exact_match: bool):
         try:
             if database == self.database[id]:
                 conn = self.conn[id]
@@ -96,7 +109,10 @@ class ValueFinder:
                     condition += ' OR '
 
                 if select_type == str:
-                    condition += '%s LIKE \'%%%s%%\'' % (column, value)
+                    if exact_match:
+                        condition += '%s = \'%s\'' % (column, value)
+                    else:
+                        condition += '%s LIKE \'%%%s%%\'' % (column, value)
                 else:
                     condition += '%s = %i' % (column, value)
 
@@ -117,14 +133,11 @@ class ValueFinder:
             if len(columns) != 0:
                 self.result.append({'database': database, 'table': table, 'columns': columns})
         except pd.errors.DatabaseError as e:
-            #print(e)
+            # print(e)
             pass
 
 
-execution = time.time()
-finder = ValueFinder('BGB-HOM-DB01', number_of_threads=0)
-findings = finder.find_value('FIADPRE', ['Cadastro'], None)
-print(('\nDuração: %s segundos\n' % str(time.time() - execution)))
-for finding in findings:
-    print(finding)
+finder = ValueFinder('BGB-HOM-DB01', number_of_threads=0 )
+findings = finder.find_value('Rodrigo', databases=['Cadastro'], tables=None, exact_match=False)
+
 
