@@ -1,6 +1,5 @@
 import time
 from math import ceil
-
 import pyodbc as pyodbc
 import pandas as pd
 from unidecode import unidecode
@@ -10,7 +9,7 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 
 
 class ValueFinder:
-    def __init__(self, server: str, number_of_threads: int = 10, connection_string: str = None):
+    def __init__(self, server: str, number_of_threads: int = 1, connection_string: str = None):
         if connection_string:
             self.conn_string = connection_string
         else:
@@ -26,6 +25,8 @@ class ValueFinder:
         self.conn: list = [None for x in range(self.number_of_threads)]
         self.tables_info: dict = {}
 
+        self.free_threads = [x for x in range(self.number_of_threads)]
+
     def find_value(self, value, databases: list = None, tables: list = None, exact_match: bool = False):
         execution = time.time()
         databases = databases if databases else self.__get_all_databases()
@@ -34,21 +35,26 @@ class ValueFinder:
             query = 'SELECT DATA_TYPE, COLUMN_NAME,CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, TABLE_NAME FROM INFORMATION_SCHEMA.COLUMNS'
             self.tables_info[database] = pd.read_sql(query, pyodbc.connect(self.conn_string.replace('#database#', database)))
             tables = tables if tables else self.__get_all_tables(database)
-            for i, table in enumerate(tables):
-                print('\r[%i/%i] Scanned Tables' % (i+1, len(tables)), end='')
+            count = 1
+            total = len(tables)
+            while len(tables) > 0:
+                print('\r[%i/%i] Scanning Tables' % (count, total), end='')
                 if self.number_of_threads > 1:
-                    waiting = True
-                    while waiting:
-                        for thread in self.threads:
-                            if not thread['task'].is_alive():
-                                thread['task'] = threading.Thread(target=self.__finder,
-                                                                  args=(value, database, table, thread['id'],
-                                                                        exact_match))
-                                thread['task'].start()
-                                waiting = False
-                                break
+                    if len(self.free_threads) > 0:
+                        thread_id = self.free_threads.pop(0)
+                        table = tables.pop(0)
+                        count += 1
+                        self.threads[thread_id]['task'] = threading.Thread(target=self.__finder,
+                                                                           args=(value, database, table, thread_id,
+                                                                                 exact_match))
+                        self.threads[thread_id]['task'].start()
+                    else:
+                        time.sleep(0.1)
                 else:
-                    self.__finder(value, database, table, 0, exact_match)
+                    count += 1
+                    self.__finder(value, database, tables.pop(0), 0, exact_match)
+        while len(self.free_threads) != self.number_of_threads:
+            time.sleep(0.5)
         print(('\n\nExecution Time: %s seconds\n' % str(ceil(time.time() - execution))))
         print('Results: ')
         for result in self.result:
@@ -72,6 +78,7 @@ class ValueFinder:
 
     def __finder(self, value, database, table, id: int, exact_match: bool):
         try:
+            begin = time.time()
             if database == self.database[id]:
                 conn = self.conn[id]
             else:
@@ -132,12 +139,11 @@ class ValueFinder:
 
             if len(columns) != 0:
                 self.result.append({'database': database, 'table': table, 'columns': columns})
+
         except pd.errors.DatabaseError as e:
             # print(e)
             pass
 
-
-finder = ValueFinder('BGB-HOM-DB01', number_of_threads=0 )
-findings = finder.find_value('Rodrigo', databases=['Cadastro'], tables=None, exact_match=False)
-
+        finally:
+            self.free_threads.append(id)
 
