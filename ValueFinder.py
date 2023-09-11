@@ -1,10 +1,11 @@
 import time
-from math import ceil
-import pyodbc as pyodbc
-import pandas as pd
-from unidecode import unidecode
+import pyodbc
 import warnings
 import threading
+import pandas as pd
+from math import ceil
+from unidecode import unidecode
+
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 
@@ -15,26 +16,29 @@ class ValueFinder:
         else:
             self.conn_string = f'Driver={{SQL Server}};'f'Server={server};''Database=#database#;''Trusted_Connection=yes;'
 
-        self.result = []
+        self.result: list[dict] = []
 
         self.number_of_threads = number_of_threads if number_of_threads > 0 else 1
 
-        self.threads = [{'id': x, 'task': threading.Thread()} for x in range(self.number_of_threads)]
+        self.threads: list[dict[str, int | None | threading.Thread]] = [{'id': x, 'task': None}
+                                                                        for x in range(self.number_of_threads)]
 
-        self.database: list = [None for x in range(self.number_of_threads)]
-        self.conn: list = [None for x in range(self.number_of_threads)]
+        self.database: list[int | None] = [None for x in range(self.number_of_threads)]
+        self.conn: list[pyodbc.Connection | None] = [None for x in range(self.number_of_threads)]
         self.tables_info: dict = {}
 
         self.free_threads = [x for x in range(self.number_of_threads)]
 
     def find_value(self, value, databases: list = None, tables: list = None, exact_match: bool = False):
         execution = time.time()
-        databases = databases if databases else self.__get_all_databases()
+        databases = databases if databases and len(databases) > 0 else self.__get_all_databases()
+        database_count = 0
         for database in databases:
-            print('Database: %s' % database)
+            database_count += 1
+            print('Database[%i/%i]: %s' % (database_count, len(databases), database))
             query = 'SELECT DATA_TYPE, COLUMN_NAME,CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, TABLE_NAME FROM INFORMATION_SCHEMA.COLUMNS'
             self.tables_info[database] = pd.read_sql(query, pyodbc.connect(self.conn_string.replace('#database#', database)))
-            tables = tables if tables else self.__get_all_tables(database)
+            tables = tables if tables and len(tables) > 0 else self.__get_all_tables(database)
             count = 1
             total = len(tables)
             while len(tables) > 0:
@@ -46,16 +50,18 @@ class ValueFinder:
                         count += 1
                         self.threads[thread_id]['task'] = threading.Thread(target=self.__finder,
                                                                            args=(value, database, table, thread_id,
-                                                                                 exact_match))
+                                                                                 exact_match), daemon=True)
                         self.threads[thread_id]['task'].start()
                     else:
                         time.sleep(0.1)
                 else:
                     count += 1
+                    self.free_threads.pop(0)
                     self.__finder(value, database, tables.pop(0), 0, exact_match)
+            print('\n')
         while len(self.free_threads) != self.number_of_threads:
             time.sleep(0.5)
-        print(('\n\nExecution Time: %s seconds\n' % str(ceil(time.time() - execution))))
+        print(('Execution Time: %s seconds\n' % str(ceil(time.time() - execution))))
         print('Results: ')
         for result in self.result:
             print(result)
@@ -78,10 +84,11 @@ class ValueFinder:
 
     def __finder(self, value, database, table, id: int, exact_match: bool):
         try:
-            begin = time.time()
             if database == self.database[id]:
                 conn = self.conn[id]
             else:
+                if type(self.conn[id]) == pyodbc.Connection:
+                    self.conn[id].close()
                 self.conn[id] = conn = pyodbc.connect(self.conn_string.replace('#database#', database))
                 self.database[id] = database
 
@@ -146,4 +153,3 @@ class ValueFinder:
 
         finally:
             self.free_threads.append(id)
-
